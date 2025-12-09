@@ -1,0 +1,190 @@
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Dict, Any
+from http.server import BaseHTTPRequestHandler
+from openai import OpenAI
+import os
+import dotenv
+
+# Load .env.local first (local dev) and fall back to a standard .env if present.
+ROOT_DIR = Path(__file__).resolve().parent.parent
+dotenv.load_dotenv(ROOT_DIR / ".env.local")
+dotenv.load_dotenv(ROOT_DIR / ".env")
+
+@dataclass
+class ConversationState:
+    questions: List[str]
+    current_index: int = 0
+    answers: Dict[int, str] = field(default_factory=dict)
+    awaiting_answer: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the conversation state into a JSON-friendly dict."""
+        return {
+            "questions": self.questions,
+            "current_index": self.current_index,
+            # JSON forces dict keys to strings; keep them as int for internal use
+            "answers": self.answers,
+            "awaiting_answer": self.awaiting_answer,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConversationState":
+        """Rehydrate state from a dict that may have stringified keys."""
+        answers_raw = data.get("answers") or {}
+        answers = {int(k): v for k, v in answers_raw.items()}
+        return cls(
+            questions=data.get("questions", []),
+            current_index=int(data.get("current_index", 0)),
+            answers=answers,
+            awaiting_answer=bool(data.get("awaiting_answer", False)),
+        )
+
+    @property
+    def complete(self) -> bool:
+        return self.current_index >= len(self.questions)
+
+
+
+def build_prompt(state: ConversationState, user_message: str) -> str:
+    """
+    Build an instruction for the LLM.
+    The LLM's goal is to be friendly but always move toward the next question.
+    """
+    # Current and remaining questions
+    if state.complete:
+        current_q = None
+        remaining = []
+    else:
+        current_q = state.questions[state.current_index]
+        remaining = state.questions[state.current_index + 1:]
+
+    previous_qas = [
+        f"Q: {state.questions[i]}\nA: {a}"
+        for i, a in state.answers.items()
+    ]
+    previous_block = "\n\n".join(previous_qas) if previous_qas else "None yet."
+
+    prompt = f"""
+        You are a friendly interviewer running a structured conversation.
+        Your main goal is to make sure the user answers each question in a list of questions.
+        Be warm and conversational. Acknowledge what the user said, then gently move to the next question.
+
+        Conversation context:
+        Previous questions and answers:
+        {previous_block}
+
+        Last user message:
+        {user_message}
+
+        {"All questions have already been answered. Thank the user and briefly summarize their answers." if state.complete else ""}
+
+        {"Current question you want them to answer next: " + current_q if current_q else ""}
+
+        Remaining questions after that:
+        {remaining}
+
+        Instructions:
+        - If there is a current question, make sure your reply clearly includes that question in natural language.
+        - You can rephrase the question to sound natural, but do not change its meaning.
+        - Keep your response short. Two or three sentences is enough.
+        """
+    return prompt.strip()
+
+
+def handle_turn(state: ConversationState, user_message: str) -> tuple[str, ConversationState]:
+    """
+    Update state with the latest user response. Then ask the next question conversationally.
+    """
+    # Only record an answer if we previously asked for one
+    if (
+        state.awaiting_answer
+        and not state.complete
+        and state.current_index not in state.answers
+    ):
+        state.answers[state.current_index] = user_message
+        state.current_index += 1
+    # Reset flag until we ask something new
+    state.awaiting_answer = False
+
+    # Build system-style prompt
+    prompt = build_prompt(state, user_message)
+
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+    # Call the model. Adjust model name to what you actually use.
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=prompt
+    )
+
+    bot_reply = response.output[0].content[0].text
+
+    # We just asked the next question (if any); expect an answer next turn
+    state.awaiting_answer = not state.complete
+
+    return bot_reply, state
+
+    
+class handler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self._set_headers(200)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b"{}"
+
+        content = ""
+        try:
+            data = json.loads(body.decode("utf-8"))
+            user_message = data.get("content", "")
+            raw_state = data.get("conversation_state", {})
+            if isinstance(raw_state, str):
+                raw_state = json.loads(raw_state or "{}")
+            conversation_state = ConversationState.from_dict(raw_state)
+        except json.JSONDecodeError:
+            content = ""
+            conversation_state = ConversationState(questions=[])
+
+        self._set_headers(200)
+        reply, new_state = handle_turn(conversation_state, user_message)
+        self.wfile.write(
+            json.dumps(
+                {"content": reply, "conversation_state": new_state.to_dict()}
+            ).encode("utf-8")
+        )
+
+def main():
+    questions = [
+        "What brings you here today?",
+        "How would you describe your current work situation?",
+        "What is the biggest challenge you are facing right now?",
+        "What would a great outcome from this conversation look like for you?"
+    ]
+
+    state = ConversationState(questions=questions)
+    print("Bot: Hi, I’d love to ask you a few questions to understand your situation better.")
+
+    while True:
+        user_message = input("You: ")
+
+        bot_reply, state = handle_turn(state, user_message)
+        print("Bot:", bot_reply)
+        print("state", state.to_dict())
+
+        if state.complete:
+            print("\nBot: That was the last question. Thanks for sharing all of that with me.")
+            break
+
+if __name__ == "__main__":
+    main()
