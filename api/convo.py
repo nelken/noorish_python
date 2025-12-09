@@ -129,12 +129,19 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
 
     
 class handler(BaseHTTPRequestHandler):
-    def _set_headers(self, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+    # Vercel may return errors before hitting handler methods; ensure CORS on all paths.
+    server_version = "NoorishServer/1.0"
+
+    def end_headers(self):
+        # Always attach CORS headers, even on errors.
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        super().end_headers()
+
+    def _set_headers(self, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
 
     def do_OPTIONS(self):
