@@ -145,6 +145,7 @@ class handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b"{}"
 
         content = ""
+        conversation_state = ConversationState(questions=[])
         try:
             data = json.loads(body.decode("utf-8"))
             user_message = data.get("content", "")
@@ -154,15 +155,26 @@ class handler(BaseHTTPRequestHandler):
             conversation_state = ConversationState.from_dict(raw_state)
         except json.JSONDecodeError:
             content = ""
-            conversation_state = ConversationState(questions=[])
+        except Exception as exc:
+            # If parsing fails for any other reason, surface a clear error
+            self._set_headers(400)
+            self.wfile.write(
+                json.dumps({"error": f"Invalid request: {exc}"}).encode("utf-8")
+            )
+            return
 
-        self._set_headers(200)
-        reply, new_state = handle_turn(conversation_state, user_message)
-        self.wfile.write(
-            json.dumps(
-                {"content": reply, "conversation_state": new_state.to_dict()}
-            ).encode("utf-8")
-        )
+        try:
+            reply, new_state = handle_turn(conversation_state, user_message)
+            self._set_headers(200)
+            self.wfile.write(
+                json.dumps(
+                    {"content": reply, "conversation_state": new_state.to_dict()}
+                ).encode("utf-8")
+            )
+        except Exception as exc:
+            # Always return CORS headers, even on failure
+            self._set_headers(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
 
 def main():
     questions = [
