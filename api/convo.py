@@ -17,7 +17,8 @@ class ConversationState:
     questions: List[str]
     current_index: int = 0
     answers: Dict[int, str] = field(default_factory=dict)
-    awaiting_answer: bool = False
+    awaiting_answer: bool = True
+    did_answer: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the conversation state into a JSON-friendly dict."""
@@ -27,6 +28,7 @@ class ConversationState:
             # JSON forces dict keys to strings; keep them as int for internal use
             "answers": self.answers,
             "awaiting_answer": self.awaiting_answer,
+            "did_answer": self.did_answer
         }
 
     @classmethod
@@ -34,11 +36,15 @@ class ConversationState:
         """Rehydrate state from a dict that may have stringified keys."""
         answers_raw = data.get("answers") or {}
         answers = {int(k): v for k, v in answers_raw.items()}
+        awaiting_raw = data.get("awaiting_answer", None)
+        if awaiting_raw is None:
+            awaiting_raw = True if not answers else False
         return cls(
             questions=data.get("questions", []),
             current_index=int(data.get("current_index", 0)),
             answers=answers,
-            awaiting_answer=bool(data.get("awaiting_answer", False)),
+            awaiting_answer=bool(awaiting_raw),
+            did_answer=bool(data.get("did_answer", False)),
         )
 
     @property
@@ -67,7 +73,7 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
     previous_block = "\n\n".join(previous_qas) if previous_qas else "None yet."
 
     prompt = f"""
-        You are a friendly interviewer running a structured conversation.
+        You are a super emphathtic and highly emotionally intelligent interviewer running a structured conversation.
         Your main goal is to make sure the user answers each question in a list of questions.
         When you get a reply from a user to an answer, apply your best judgement to determine whether the user actually addressed the question or not. 
 
@@ -95,14 +101,18 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
     return prompt.strip()
 
 def does_answer(client, question, message):
-    prompt = f"does the following message: {message} answer the question: {question}. return true or false and nothing else", message, question
+    prompt = (
+        f"Does the following message answer the question?\n"
+        f"Question: {question}\n"
+        f"Message: {message}\n"
+        "Respond with only 'true' or 'false'."
+    )
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": str(prompt)}],
+        messages=[{"role": "user", "content": prompt}],
         max_tokens=5,
     )
     answer_text = response.choices[0].message.content.strip().lower()
-    print("does_answer", answer_text)
     return answer_text == "true"
 
 def handle_turn(state: ConversationState, user_message: str) -> tuple[str, ConversationState]:
@@ -112,16 +122,19 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
     # Only record an answer if we previously asked for one
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
+    # If this is the very first turn and no flag was set, expect an answer
+    if not state.awaiting_answer and not state.answers and state.current_index == 0:
+        state.awaiting_answer = True
 
-    ####TODO: add LLM decision on whether the user answered the question or not
     if (
         state.awaiting_answer
         and not state.complete
         and state.current_index not in state.answers
     ):
-        if does_answer(client, user_message, state.questions[state.current_index]):
+        if does_answer(client, state.questions[state.current_index], user_message):
             state.answers[state.current_index] = user_message + '.'
             state.current_index += 1
+            state.did_answer = True
     # Reset flag until we ask something new
     state.awaiting_answer = False
 
