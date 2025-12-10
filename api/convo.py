@@ -14,19 +14,24 @@ dotenv.load_dotenv(ROOT_DIR / ".env")
 
 @dataclass
 class ConversationState:
+    themes: List[str]
+    theme_questions: List[List[str]]
     questions: List[str]
     current_index: int = 0
     answers: Dict[int, str] = field(default_factory=dict)
+    themes_addressed: Dict[int, str] = field(default_factory=dict)
     awaiting_answer: bool = True
     did_answer: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the conversation state into a JSON-friendly dict."""
         return {
+            "themes": self.themes, 
+            "theme_questions": self.theme_questions,
             "questions": self.questions,
             "current_index": self.current_index,
-            # JSON forces dict keys to strings; keep them as int for internal use
             "answers": self.answers,
+            "themes_addressed": self.themes_addressed,
             "awaiting_answer": self.awaiting_answer,
             "did_answer": self.did_answer
         }
@@ -36,13 +41,22 @@ class ConversationState:
         """Rehydrate state from a dict that may have stringified keys."""
         answers_raw = data.get("answers") or {}
         answers = {int(k): v for k, v in answers_raw.items()}
+        
+        themes_addressed_raw = data.get("themes_addressed") or {}
+        themes_addressed = {int(k): v for k, v in themes_addressed_raw.items()}
+
+        theme_questions = data.get("theme_questions", [])
+
         awaiting_raw = data.get("awaiting_answer", None)
         if awaiting_raw is None:
             awaiting_raw = True if not answers else False
         return cls(
+            themes=data.get("themes", []),            
+            theme_questions=theme_questions,
             questions=data.get("questions", []),
             current_index=int(data.get("current_index", 0)),
             answers=answers,
+            themes_addressed=themes_addressed,
             awaiting_answer=bool(awaiting_raw),
             did_answer=bool(data.get("did_answer", False)),
         )
@@ -183,17 +197,14 @@ class handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b"{}"
 
-        content = ""
-        conversation_state = ConversationState(questions=[])
+        conversation_state = ConversationState(themes=[], theme_questions=[], questions=[])
         try:
             data = json.loads(body.decode("utf-8"))
             user_message = data.get("content", "")
             raw_state = data.get("conversation_state", {})
             if isinstance(raw_state, str):
                 raw_state = json.loads(raw_state or "{}")
-            conversation_state = ConversationState.from_dict(raw_state)
-        except json.JSONDecodeError:
-            content = ""
+            conversation_state = ConversationState.from_dict(raw_state)            
         except Exception as exc:
             # If parsing fails for any other reason, surface a clear error
             self._set_headers(400)
@@ -217,16 +228,28 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
 
 def main():
+    themes=["Exhaustion", "Depersonalization", "Professional efficacy"]
     questions = [
       'Tell me about the last time you felt completely wiped out. What was happening that day?',
       'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?',
       'These days, what part of work makes you want to just check out or stop caring?',
       'When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
       'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?'
-
+    ]
+    theme_questions = [
+        # Exhaustion
+        ['Tell me about the last time you felt completely wiped out. What was happening that day?', 
+         'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?'],
+        # Depersonalization
+        ['These days, what part of work makes you want to just check out or stop caring?'],
+        # Professional efficacy
+        ['When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
+         'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?']
     ]
 
-    state = ConversationState(questions=questions)
+
+    state = ConversationState(themes=themes, theme_questions=theme_questions, questions=questions)
+
     print("Bot: Hi, I’d love to ask you a few questions to understand your situation better.")
 
     while True:
@@ -242,3 +265,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
