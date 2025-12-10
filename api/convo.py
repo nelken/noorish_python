@@ -6,6 +6,10 @@ from http.server import BaseHTTPRequestHandler
 from openai import OpenAI
 import os
 import dotenv
+try:
+    from api.does_answer import does_answer
+except ImportError:
+    from does_answer import does_answer
 
 # Load .env.local first (local dev) and fall back to a standard .env if present.
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -113,21 +117,6 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
         - If the user answers very shortly ask for clarification
         """
     return prompt.strip()
-
-def does_answer(client, question, message):
-    prompt = (
-        f"Does the following message answer the question?\n"
-        f"Question: {question}\n"
-        f"Message: {message}\n"
-        "Respond with only 'true' or 'false'."
-    )
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=5,
-    )
-    answer_text = response.choices[0].message.content.strip().lower()
-    return answer_text == "true"
 
 def handle_turn(state: ConversationState, user_message: str) -> tuple[str, ConversationState]:
     """
@@ -265,4 +254,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
