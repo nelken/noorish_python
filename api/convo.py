@@ -154,6 +154,9 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
     # We just asked the next question (if any); expect an answer next turn
     state.awaiting_answer = not state.complete
 
+    if state.complete:
+        bot_reply += " Thanks for completing the survey, next steps to follow..."
+
     return bot_reply, state
 
     
