@@ -135,13 +135,13 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
             state.answers[state.current_index] = user_message + '.'
             state.current_index += 1
             state.did_answer = True
+        else:
+            state.did_answer = False
     # Reset flag until we ask something new
-    state.awaiting_answer = False
+    #state.awaiting_answer = False
 
     # Build system-style prompt
     prompt = build_prompt(state, user_message)
-
-    
 
     # Call the model. Using chat completions for stability on Vercel.
     response = client.chat.completions.create(
@@ -218,7 +218,7 @@ class handler(BaseHTTPRequestHandler):
 
 def main():
     questions = [
-        'Tell me about the last time you felt completely wiped out. What was happening that day?',
+      'Tell me about the last time you felt completely wiped out. What was happening that day?',
       'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?',
       'These days, what part of work makes you want to just check out or stop caring?',
       'When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
