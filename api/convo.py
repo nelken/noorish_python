@@ -69,7 +69,9 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
     prompt = f"""
         You are a friendly interviewer running a structured conversation.
         Your main goal is to make sure the user answers each question in a list of questions.
-        Be warm and conversational. Acknowledge what the user said, then gently move to the next question.
+        When you get a reply from a user to an answer, apply your best judgement to determine whether the user actually addressed the question or not. 
+
+        Be warm and conversational. Acknowledge what the user said. 
 
         Conversation context:
         Previous questions and answers:
@@ -86,41 +88,55 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
         {remaining}
 
         Instructions:
-        - If there is a current question, make sure your reply clearly includes that question in natural language.
-        - You can rephrase the question to sound natural, but do not change its meaning.
-        - Keep your response short. Two or three sentences is enough.
+        - If there is a current question, make sure your reply clearly includes a paraphrase of that question in natural language. 
+        - Do not repeat the question verbatim. Instead rephrase it differently but keep the same meaning. 
+        - If the user answers very shortly ask for clarification
         """
     return prompt.strip()
 
+def does_answer(client, question, message):
+    prompt = f"does the following message: {message} answer the question: {question}. return true or false and nothing else", message, question
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": str(prompt)}],
+        max_tokens=5,
+    )
+    answer_text = response.choices[0].message.content.strip().lower()
+    print("does_answer", answer_text)
+    return answer_text == "true"
 
 def handle_turn(state: ConversationState, user_message: str) -> tuple[str, ConversationState]:
     """
     Update state with the latest user response. Then ask the next question conversationally.
     """
     # Only record an answer if we previously asked for one
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+    ####TODO: add LLM decision on whether the user answered the question or not
     if (
         state.awaiting_answer
         and not state.complete
         and state.current_index not in state.answers
     ):
-        state.answers[state.current_index] = user_message
-        state.current_index += 1
+        if does_answer(client, user_message, state.questions[state.current_index]):
+            state.answers[state.current_index] = user_message + '.'
+            state.current_index += 1
     # Reset flag until we ask something new
     state.awaiting_answer = False
 
     # Build system-style prompt
     prompt = build_prompt(state, user_message)
 
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    
 
-
-    # Call the model. Adjust model name to what you actually use.
-    response = client.responses.create(
+    # Call the model. Using chat completions for stability on Vercel.
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
-        input=prompt
+        messages=[{"role": "user", "content": prompt}],
     )
 
-    bot_reply = response.output[0].content[0].text
+    bot_reply = response.choices[0].message.content
 
     # We just asked the next question (if any); expect an answer next turn
     state.awaiting_answer = not state.complete
@@ -172,6 +188,7 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             reply, new_state = handle_turn(conversation_state, user_message)
+            print("new_state", new_state)
             self._set_headers(200)
             self.wfile.write(
                 json.dumps(
@@ -185,10 +202,12 @@ class handler(BaseHTTPRequestHandler):
 
 def main():
     questions = [
-        "What brings you here today?",
-        "How would you describe your current work situation?",
-        "What is the biggest challenge you are facing right now?",
-        "What would a great outcome from this conversation look like for you?"
+        'Tell me about the last time you felt completely wiped out. What was happening that day?',
+      'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?',
+      'These days, what part of work makes you want to just check out or stop caring?',
+      'When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
+      'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?'
+
     ]
 
     state = ConversationState(questions=questions)
