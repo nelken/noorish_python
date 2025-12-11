@@ -7,9 +7,9 @@ from openai import OpenAI
 import os
 import dotenv
 try:
-    from api.does_answer import does_answer
+    from api.does_answer import does_answer, too_short
 except ImportError:
-    from does_answer import does_answer
+    from does_answer import does_answer, too_short
 
 # Load .env.local first (local dev) and fall back to a standard .env if present.
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -134,6 +134,12 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
         and not state.complete
         and state.current_index not in state.answers
     ):
+        # if too_short(client, state.questions[state.current_index], user_message):
+        #     state.did_answer = False
+        #     if not state.current_index in state.answers:
+        #         state.answers[state.current_index] = ''
+        #     state.answers[state.current_index] += ' ' + user_message + ". "
+        #     return "thanks for sharing that, do you mind elaborating a bit?", state
         if does_answer(client, state.questions[state.current_index], user_message):
             state.answers[state.current_index] = user_message + '.'
             state.current_index += 1
@@ -204,7 +210,7 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             reply, new_state = handle_turn(conversation_state, user_message)
-            print("new_state", new_state)
+            #print("new_state", new_state)
             self._set_headers(200)
             self.wfile.write(
                 json.dumps(
