@@ -1,121 +1,25 @@
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any
 from http.server import BaseHTTPRequestHandler
 from openai import OpenAI
 import os
 import dotenv
+
 try:
+    from api.conversation_state import ConversationState
+    from api.theme_state import ThemeState
     from api.does_answer import does_answer, too_short
+    from api.burnout import get_burnout
 except ImportError:
+    from conversation_state import ConversationState
+    from theme_state import ThemeState
     from does_answer import does_answer, too_short
+    from burnout import get_burnout
 
 # Load .env.local first (local dev) and fall back to a standard .env if present.
 ROOT_DIR = Path(__file__).resolve().parent.parent
 dotenv.load_dotenv(ROOT_DIR / ".env.local")
 dotenv.load_dotenv(ROOT_DIR / ".env")
-
-@dataclass
-class ConversationState:
-    questions: List[str]
-    current_index: int = 0
-    answers: Dict[int, str] = field(default_factory=dict)
-    awaiting_answer: bool = True
-    did_answer: bool = False
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize the conversation state into a JSON-friendly dict."""
-        return {
-            "questions": self.questions,
-            "current_index": self.current_index,
-            "answers": self.answers,
-            "awaiting_answer": self.awaiting_answer,
-            "did_answer": self.did_answer,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ConversationState":
-        """Rehydrate state from a dict that may have stringified keys."""
-        questions = data.get("questions") or []
-
-        answers_raw = data.get("answers") or {}
-        answers = {}
-        for k, v in answers_raw.items():
-            try:
-                answers[int(k)] = v
-            except ValueError:
-                continue
-
-        awaiting_raw = data.get("awaiting_answer", None)
-        if awaiting_raw is None:
-            awaiting_raw = True if not answers else False
-
-        return cls(
-            questions=questions,
-            current_index=int(data.get("current_index", 0)),
-            answers=answers,
-            awaiting_answer=bool(awaiting_raw),
-            did_answer=bool(data.get("did_answer", False)),
-        )
-
-    @property
-    def complete(self) -> bool:
-        return self.current_index >= len(self.questions)
-
-
-@dataclass
-class ThemeState:
-    themes: List[str]
-    theme_questions: List[List[str]]
-    current_theme_index: int = 0
-    themes_addressed: Dict[int, str] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "themes": self.themes,
-            "theme_questions": self.theme_questions,
-            "current_theme_index": self.current_theme_index,
-            "themes_addressed": self.themes_addressed,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ThemeState":
-        themes = data.get("themes", []) or []
-        theme_questions = [q_list or [] for q_list in (data.get("theme_questions") or [])]
-        return cls(
-            themes=themes,
-            theme_questions=theme_questions,
-            current_theme_index=int(data.get("current_theme_index", 0)),
-            themes_addressed={int(k): v for k, v in (data.get("themes_addressed") or {}).items()},
-        )
-
-    @property
-    def current_theme(self) -> str:
-        if 0 <= self.current_theme_index < len(self.themes):
-            return self.themes[self.current_theme_index]
-        return ""
-
-    @property
-    def current_questions(self) -> List[str]:
-        if 0 <= self.current_theme_index < len(self.theme_questions):
-            return self.theme_questions[self.current_theme_index] or []
-        return []
-
-    def has_more_themes(self) -> bool:
-        return self.current_theme_index < len(self.theme_questions) - 1
-
-    def mark_current_addressed(self) -> None:
-        if (
-            0 <= self.current_theme_index < len(self.themes)
-            and self.current_theme_index not in self.themes_addressed
-        ):
-            self.themes_addressed[self.current_theme_index] = self.themes[self.current_theme_index]
-
-    def advance_theme(self) -> None:
-        self.current_theme_index += 1
-
-
 
 def build_prompt(state: ConversationState, theme_state: ThemeState, user_message: str) -> str:
     """
@@ -327,7 +231,8 @@ def main():
 
         if state.complete:
             print("\nBot: That was the last question. Thanks for sharing all of that with me.")
-            break
+            print(get_burnout(state))
+
 
 if __name__ == "__main__":
     main()
