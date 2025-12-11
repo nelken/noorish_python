@@ -18,49 +18,43 @@ dotenv.load_dotenv(ROOT_DIR / ".env")
 
 @dataclass
 class ConversationState:
-    themes: List[str]
-    theme_questions: List[List[str]]
     questions: List[str]
     current_index: int = 0
     answers: Dict[int, str] = field(default_factory=dict)
-    themes_addressed: Dict[int, str] = field(default_factory=dict)
     awaiting_answer: bool = True
     did_answer: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the conversation state into a JSON-friendly dict."""
         return {
-            "themes": self.themes, 
-            "theme_questions": self.theme_questions,
             "questions": self.questions,
             "current_index": self.current_index,
             "answers": self.answers,
-            "themes_addressed": self.themes_addressed,
             "awaiting_answer": self.awaiting_answer,
-            "did_answer": self.did_answer
+            "did_answer": self.did_answer,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConversationState":
         """Rehydrate state from a dict that may have stringified keys."""
-        answers_raw = data.get("answers") or {}
-        answers = {int(k): v for k, v in answers_raw.items()}
-        
-        themes_addressed_raw = data.get("themes_addressed") or {}
-        themes_addressed = {int(k): v for k, v in themes_addressed_raw.items()}
+        questions = data.get("questions") or []
 
-        theme_questions = data.get("theme_questions", [])
+        answers_raw = data.get("answers") or {}
+        answers = {}
+        for k, v in answers_raw.items():
+            try:
+                answers[int(k)] = v
+            except ValueError:
+                continue
 
         awaiting_raw = data.get("awaiting_answer", None)
         if awaiting_raw is None:
             awaiting_raw = True if not answers else False
+
         return cls(
-            themes=data.get("themes", []),            
-            theme_questions=theme_questions,
-            questions=data.get("questions", []),
+            questions=questions,
             current_index=int(data.get("current_index", 0)),
             answers=answers,
-            themes_addressed=themes_addressed,
             awaiting_answer=bool(awaiting_raw),
             did_answer=bool(data.get("did_answer", False)),
         )
@@ -70,8 +64,60 @@ class ConversationState:
         return self.current_index >= len(self.questions)
 
 
+@dataclass
+class ThemeState:
+    themes: List[str]
+    theme_questions: List[List[str]]
+    current_theme_index: int = 0
+    themes_addressed: Dict[int, str] = field(default_factory=dict)
 
-def build_prompt(state: ConversationState, user_message: str) -> str:
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "themes": self.themes,
+            "theme_questions": self.theme_questions,
+            "current_theme_index": self.current_theme_index,
+            "themes_addressed": self.themes_addressed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ThemeState":
+        themes = data.get("themes", []) or []
+        theme_questions = [q_list or [] for q_list in (data.get("theme_questions") or [])]
+        return cls(
+            themes=themes,
+            theme_questions=theme_questions,
+            current_theme_index=int(data.get("current_theme_index", 0)),
+            themes_addressed={int(k): v for k, v in (data.get("themes_addressed") or {}).items()},
+        )
+
+    @property
+    def current_theme(self) -> str:
+        if 0 <= self.current_theme_index < len(self.themes):
+            return self.themes[self.current_theme_index]
+        return ""
+
+    @property
+    def current_questions(self) -> List[str]:
+        if 0 <= self.current_theme_index < len(self.theme_questions):
+            return self.theme_questions[self.current_theme_index] or []
+        return []
+
+    def has_more_themes(self) -> bool:
+        return self.current_theme_index < len(self.theme_questions) - 1
+
+    def mark_current_addressed(self) -> None:
+        if (
+            0 <= self.current_theme_index < len(self.themes)
+            and self.current_theme_index not in self.themes_addressed
+        ):
+            self.themes_addressed[self.current_theme_index] = self.themes[self.current_theme_index]
+
+    def advance_theme(self) -> None:
+        self.current_theme_index += 1
+
+
+
+def build_prompt(state: ConversationState, theme_state: ThemeState, user_message: str) -> str:
     """
     Build an instruction for the LLM.
     The LLM's goal is to be friendly but always move toward the next question.
@@ -84,10 +130,17 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
         current_q = state.questions[state.current_index]
         remaining = state.questions[state.current_index + 1:]
 
-    previous_qas = [
-        f"Q: {state.questions[i]}\nA: {a}"
-        for i, a in state.answers.items()
-    ]
+    current_theme = theme_state.current_theme if not state.complete else theme_state.current_theme
+
+    previous_qas = []
+    for i in sorted(state.answers.keys()):
+        a = state.answers[i]
+        question = state.questions[i] if i < len(state.questions) else f"Question {i + 1}"
+        theme_label = theme_state.current_theme
+        if theme_label:
+            previous_qas.append(f"[{theme_label}] Q: {question}\nA: {a}")
+        else:
+            previous_qas.append(f"Q: {question}\nA: {a}")
     previous_block = "\n\n".join(previous_qas) if previous_qas else "None yet."
 
     prompt = f"""
@@ -106,6 +159,8 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
 
         {"All questions have already been answered. Thank the user and briefly summarize their answers." if state.complete else ""}
 
+        {"Current theme: " + current_theme if current_theme else ""}
+
         {"Current question you want them to answer next: " + current_q if current_q else ""}
 
         Remaining questions after that:
@@ -118,7 +173,7 @@ def build_prompt(state: ConversationState, user_message: str) -> str:
         """
     return prompt.strip()
 
-def handle_turn(state: ConversationState, user_message: str) -> tuple[str, ConversationState]:
+def handle_turn(state: ConversationState, theme_state: ThemeState, user_message: str) -> tuple[str, ConversationState, ThemeState]:
     """
     Update state with the latest user response. Then ask the next question conversationally.
     """
@@ -146,11 +201,21 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
             state.did_answer = True
         else:
             state.did_answer = False
-    # Reset flag until we ask something new
-    #state.awaiting_answer = False
 
+    # If we finished this theme and there is another theme, move to the next one
+    if state.complete:
+        theme_state.mark_current_addressed()
+        if theme_state.has_more_themes():
+            theme_state.advance_theme()
+            state = ConversationState(
+                questions=theme_state.current_questions,
+                current_index=0,
+                answers={},
+                awaiting_answer=True,
+                did_answer=False,
+            )
     # Build system-style prompt
-    prompt = build_prompt(state, user_message)
+    prompt = build_prompt(state, theme_state, user_message)
 
     # Call the model. Using chat completions for stability on Vercel.
     response = client.chat.completions.create(
@@ -166,7 +231,7 @@ def handle_turn(state: ConversationState, user_message: str) -> tuple[str, Conve
     if state.complete:
         bot_reply += " Thanks for completing the survey, next steps to follow..."
 
-    return bot_reply, state
+    return bot_reply, state, theme_state
 
     
 class handler(BaseHTTPRequestHandler):
@@ -192,14 +257,23 @@ class handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b"{}"
 
-        conversation_state = ConversationState(themes=[], theme_questions=[], questions=[])
+        conversation_state = ConversationState(questions=[])
+        theme_state = ThemeState(themes=[], theme_questions=[])
         try:
             data = json.loads(body.decode("utf-8"))
             user_message = data.get("content", "")
             raw_state = data.get("conversation_state", {})
+            raw_theme = data.get("theme_state", {})
             if isinstance(raw_state, str):
                 raw_state = json.loads(raw_state or "{}")
-            conversation_state = ConversationState.from_dict(raw_state)            
+            if isinstance(raw_theme, str):
+                raw_theme = json.loads(raw_theme or "{}")
+            conversation_state = ConversationState.from_dict(raw_state)
+            theme_state = ThemeState.from_dict(raw_theme)
+
+            # If no questions present, pull them from the current theme.
+            if not conversation_state.questions and theme_state.theme_questions:
+                conversation_state.questions = theme_state.current_questions
         except Exception as exc:
             # If parsing fails for any other reason, surface a clear error
             self._set_headers(400)
@@ -209,12 +283,16 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            reply, new_state = handle_turn(conversation_state, user_message)
+            reply, new_state, new_theme_state = handle_turn(conversation_state, theme_state, user_message)
             #print("new_state", new_state)
             self._set_headers(200)
             self.wfile.write(
                 json.dumps(
-                    {"content": reply, "conversation_state": new_state.to_dict()}
+                    {
+                        "content": reply,
+                        "conversation_state": new_state.to_dict(),
+                        "theme_state": new_theme_state.to_dict(),
+                    }
                 ).encode("utf-8")
             )
         except Exception as exc:
@@ -224,13 +302,6 @@ class handler(BaseHTTPRequestHandler):
 
 def main():
     themes=["Exhaustion", "Depersonalization", "Professional efficacy"]
-    questions = [
-      'Tell me about the last time you felt completely wiped out. What was happening that day?',
-      'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?',
-      'These days, what part of work makes you want to just check out or stop caring?',
-      'When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
-      'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?'
-    ]
     theme_questions = [
         # Exhaustion
         ['Tell me about the last time you felt completely wiped out. What was happening that day?', 
@@ -241,18 +312,18 @@ def main():
         ['When you think about your actual skills and what you can do—not how you feel—how confident are you that you\'re still good at your work?',
          'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?']
     ]
-
-
-    state = ConversationState(themes=themes, theme_questions=theme_questions, questions=questions)
+    theme_state = ThemeState(themes=themes, theme_questions=theme_questions)
+    
+    state = ConversationState(questions=theme_state.current_questions)
 
     print("Bot: Hi, I’d love to ask you a few questions to understand your situation better.")
 
     while True:
         user_message = input("You: ")
 
-        bot_reply, state = handle_turn(state, user_message)
+        bot_reply, state, theme_state = handle_turn(state, theme_state, user_message)
         print("Bot:", bot_reply)
-        print("state", state.to_dict())
+        #print("state", state.to_dict())
 
         if state.complete:
             print("\nBot: That was the last question. Thanks for sharing all of that with me.")
