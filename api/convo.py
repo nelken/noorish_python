@@ -93,31 +93,43 @@ def handle_turn(state: ConversationState, theme_state: ThemeState, user_message:
         and not state.complete
         and state.current_index not in state.answers
     ):
+        #print(state.questions[state.current_index], user_message)
         # if too_short(client, state.questions[state.current_index], user_message):
         #     state.did_answer = False
         #     if not state.current_index in state.answers:
         #         state.answers[state.current_index] = ''
         #     state.answers[state.current_index] += ' ' + user_message + ". "
         #     return "thanks for sharing that, do you mind elaborating a bit?", state
-        if does_answer(client, state.questions[state.current_index], user_message):
+        
+        # don't check chitchat theme for does answer
+        if theme_state.current_theme == 'chitchat' or does_answer(client, state.questions[state.current_index], user_message):
             state.answers[state.current_index] = user_message + '.'
             state.current_index += 1
             state.did_answer = True
         else:
             state.did_answer = False
 
+    # Persist the latest state for the current theme
+    theme_state.set_conversation_state(theme_state.current_theme_index, state)
+
     # If we finished this theme and there is another theme, move to the next one
     if state.complete:
         theme_state.mark_current_addressed()
         if theme_state.has_more_themes():
             theme_state.advance_theme()
-            state = ConversationState(
-                questions=theme_state.current_questions,
-                current_index=0,
-                answers={},
-                awaiting_answer=True,
-                did_answer=False,
-            )
+            # Resume a prior conversation for this theme if it exists; otherwise start fresh
+            existing = theme_state.get_conversation_state(theme_state.current_theme_index)
+            if existing:
+                state = existing
+            else:
+                state = ConversationState(
+                    questions=theme_state.current_questions,
+                    current_index=0,
+                    answers={},
+                    awaiting_answer=True,
+                    did_answer=False,
+                )
+                theme_state.set_conversation_state(theme_state.current_theme_index, state)
     # Build system-style prompt
     prompt = build_prompt(state, theme_state, user_message)
 
@@ -178,6 +190,8 @@ class handler(BaseHTTPRequestHandler):
             # If no questions present, pull them from the current theme.
             if not conversation_state.questions and theme_state.theme_questions:
                 conversation_state.questions = theme_state.current_questions
+            # Track conversation state per theme
+            theme_state.set_conversation_state(theme_state.current_theme_index, conversation_state)
         except Exception as exc:
             # If parsing fails for any other reason, surface a clear error
             self._set_headers(400)
@@ -205,8 +219,10 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
 
 def main():
-    themes=["Exhaustion", "Depersonalization", "Professional efficacy"]
+    themes=["chitchat", "Exhaustion", "Depersonalization", "Professional efficacy"]
     theme_questions = [
+        # Chitchat
+        ["Hi, I’d love to ask you a few questions to understand your situation better."],
         # Exhaustion
         ['Tell me about the last time you felt completely wiped out. What was happening that day?', 
          'When you hit that wiped-out feeling, what drains fastest: your patience with people, your physical energy, or your ability to think clearly?'],
@@ -217,18 +233,21 @@ def main():
          'Looking back over the last few months, is this feeling getting better, staying the same, or getting worse?']
     ]
     theme_state = ThemeState(themes=themes, theme_questions=theme_questions)
+
     
     state = ConversationState(questions=theme_state.current_questions)
+    theme_state.set_conversation_state(theme_state.current_theme_index, state)
 
-    print("Bot: Hi, I’d love to ask you a few questions to understand your situation better.")
-
+    print(theme_questions[0][0])
+        
     while True:
         user_message = input("You: ")
 
         bot_reply, state, theme_state = handle_turn(state, theme_state, user_message)
-        print("Bot:", bot_reply)
-        #print("state", state.to_dict())
+        print("state", state.to_dict())
 
+        print("Bot:", bot_reply)
+        
         if state.complete:
             print("\nBot: That was the last question. Thanks for sharing all of that with me.")
             print(get_burnout(state))
